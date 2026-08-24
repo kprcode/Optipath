@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+    <title>Optipath</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: rgba(255, 255, 255, 0.98);
+            --text: #0f172a;
+            --shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        
+        body, html { 
+            height: 100%; 
+            width: 100%;
+            overflow: hidden; 
+            position: fixed; /* Prevents "pull-to-refresh" on mobile */
+        }
+
+        #map { 
+            width: 100%; 
+            height: 100%; 
+            z-index: 1;
+        }
+
+        /* Responsive Panel */
+        .panel {
+            position: absolute;
+            bottom: 20px; /* Anchored to bottom on mobile for thumb reach */
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 400px;
+            background: var(--bg);
+            border-radius: 16px;
+            padding: 16px;
+            box-shadow: var(--shadow);
+            z-index: 1000;
+            transition: all 0.3s ease;
+        }
+
+        /* Desktop Adjustment */
+        @media (min-width: 768px) {
+            .panel {
+                top: 20px;
+                bottom: auto;
+                left: 20px;
+                transform: none;
+                width: 320px;
+            }
+        }
+
+        h2 { font-size: 1.2rem; margin-bottom: 4px; color: var(--text); }
+        
+        .btn {
+            width: 100%;
+            padding: 14px; /* Larger touch target for mobile */
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-bottom: 8px;
+            font-size: 1rem;
+            display: block;
+            touch-action: manipulation;
+        }
+
+        .solve-btn { background: var(--primary); color: white; }
+        .solve-btn:active { opacity: 0.8; }
+        .clear-btn { background: #f1f5f9; color: #475569; }
+
+        .result { 
+            margin-top: 10px; 
+            font-size: 0.85rem; 
+            line-height: 1.4; 
+            max-height: 120px; 
+            overflow-y: auto; 
+        }
+
+        /* Hide the default Leaflet routing UI */
+        .leaflet-routing-container { display: none !important; }
+        
+        /* Adjust Leaflet zoom controls for mobile */
+        @media (max-width: 767px) {
+            .leaflet-top.leaflet-left { top: 10px; left: 10px; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="panel">
+    <h2>Optipath</h2>
+    <p style="font-size: 0.75rem; color: #64748b; margin-bottom: 12px;">
+        Tap map to add up to 10 points. Finds the shortest road loop.
+    </p>
+
+    <button class="btn solve-btn" id="solveBtn" onclick="runOptimalTSP()">Find Optimal Route</button>
+    <button class="btn clear-btn" onclick="clearAll()">Clear All</button>
+
+    <div id="result" class="result"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+
+<script>
+    // Initializing map with gesture handling (prevents map from moving while scrolling page)
+    const map = L.map('map', {
+        tap: false, // Prevents double-tap zoom issues on some mobiles
+        zoomControl: true
+    }).setView([12.9716, 77.5946], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let cities = [];
+    let markers = [];
+    let routingControl = null;
+
+    map.on('click', (e) => {
+        if(cities.length >= 10) {
+            alert("Limit to 10 cities for Brute Force performance!");
+            return;
+        }
+        const city = { lat: e.latlng.lat, lng: e.latlng.lng, id: cities.length };
+        cities.push(city);
+        
+        const marker = L.marker([city.lat, city.lng]).addTo(map)
+            .bindTooltip((cities.length).toString(), {permanent: true, direction: 'top'});
+        markers.push(marker);
+    });
+
+    function getDist(c1, c2) {
+        const dx = c1.lat - c2.lat;
+        const dy = c1.lng - c2.lng;
+        return Math.sqrt(dx*dx + dy*dy);
+    }
+
+    function getAllPermutations(arr) {
+        let results = [];
+        if (arr.length === 1) return [arr];
+        for (let i = 0; i < arr.length; i++) {
+            let first = arr[i];
+            let rest = arr.slice(0, i).concat(arr.slice(i + 1));
+            let innerPerms = getAllPermutations(rest);
+            for (let j = 0; j < innerPerms.length; j++) {
+                results.push([first, ...innerPerms[j]]);
+            }
+        }
+        return results;
+    }
+
+    async function runOptimalTSP() {
+        if (cities.length < 3) {
+            alert("Add at least 3 points on the map.");
+            return;
+        }
+
+        const btn = document.getElementById('solveBtn');
+        const resultDiv = document.getElementById('result');
+        
+        btn.innerText = "Calculating...";
+        btn.disabled = true;
+
+        // Using setTimeout to let UI update before heavy computation
+        setTimeout(() => {
+            const startCity = cities[0];
+            const otherCities = cities.slice(1);
+            const permutations = getAllPermutations(otherCities);
+
+            let minDistance = Infinity;
+            let bestPath = [];
+
+            permutations.forEach(p => {
+                let currentPath = [startCity, ...p, startCity];
+                let currentDist = 0;
+                for (let i = 0; i < currentPath.length - 1; i++) {
+                    currentDist += getDist(currentPath[i], currentPath[i+1]);
+                }
+                if (currentDist < minDistance) {
+                    minDistance = currentDist;
+                    bestPath = currentPath;
+                }
+            });
+
+            if(routingControl) map.removeControl(routingControl);
+            
+            const waypoints = bestPath.map(c => L.latLng(c.lat, c.lng));
+            
+            routingControl = L.Routing.control({
+                waypoints: waypoints,
+                createMarker: () => null,
+                addWaypoints: false,
+                routeWhileDragging: false,
+                lineOptions: { styles: [{ color: '#2563eb', weight: 5, opacity: 0.7 }] }
+            }).addTo(map);
+
+            routingControl.on('routesfound', (e) => {
+                const distKm = (e.routes[0].summary.totalDistance / 1000).toFixed(2);
+                resultDiv.innerHTML = `
+                    <div style="background: #f0fdf4; padding: 8px; border-radius: 8px; border: 1px solid #bbf7d0;">
+                        <b style="color: #166534;">Success!</b><br>
+                        Distance: <b>${distKm} km</b><br>
+                        Order: ${bestPath.map(c => (cities.indexOf(c)+1)).join(' → ')}
+                    </div>
+                `;
+                btn.innerText = "Find Optimal Route";
+                btn.disabled = false;
+                
+                // Auto-zoom to fit the route on small screens
+                const group = new L.featureGroup(markers);
+                map.fitBounds(group.getBounds().pad(0.2));
+            });
+
+            routingControl.on('routingerror', () => {
+                btn.innerText = "Find Optimal Route";
+                btn.disabled = false;
+                alert("Could not find road path. Are points accessible?");
+            });
+        }, 100);
+    }
+
+    function clearAll() {
+        cities = [];
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+        if(routingControl) map.removeControl(routingControl);
+        document.getElementById('result').innerHTML = '';
+        document.getElementById('solveBtn').innerText = "Find Optimal Route";
+        document.getElementById('solveBtn').disabled = false;
+    }
+</script>
+</body>
+</html>
